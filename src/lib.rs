@@ -6,6 +6,8 @@ use std::env;
 
 mod handler;
 mod commands;
+mod utils;
+mod types;
 
 use handler::Handler;
 
