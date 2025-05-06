@@ -1,14 +1,14 @@
 use serenity::{
     async_trait,
     model::{
+        application::command::Command,
         application::interaction::Interaction,
         gateway::Ready,
-        prelude::GuildId,
     },
 };
 use serenity::client::{Context, EventHandler};
 
-use crate::commands::{modlist, ping};
+use crate::commands::{modlist, modsearch, ping};
 
 pub struct Handler;
 
@@ -17,13 +17,13 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
         println!("Bot is connected!");
 
-        let guild_id = GuildId(663764960202981435);
-
-        // Register slash commands
-        let _ = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
+        // === REGISTER GLOBAL COMMANDS ===
+        // This will replace any existing global commands.
+        let _ = Command::set_global_application_commands(&ctx.http, |commands| {
             commands
                 .create_application_command(|cmd| ping::register(cmd))
                 .create_application_command(|cmd| modlist::register(cmd))
+                .create_application_command(|cmd| modsearch::register(cmd))
         })
         .await;
     }
@@ -31,24 +31,36 @@ impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         match interaction {
             // Slash commands
-            Interaction::ApplicationCommand(command) => {
-                match command.data.name.as_str() {
+            Interaction::ApplicationCommand(cmd) => {
+                match cmd.data.name.as_str() {
                     "ping" => {
-                        ping::run(&ctx, &command).await;
+                        ping::run(&ctx, &cmd).await;
                     }
                     "modlist" => {
-                        if let Err(e) = modlist::run(&ctx, &command).await {
-                            println!("Error running modlist command: {:?}", e);
+                        if let Err(e) = modlist::run(&ctx, &cmd).await {
+                            println!("Error running modlist: {:?}", e);
+                        }
+                    }
+                    "modsearch" => {
+                        if let Err(e) = modsearch::run(&ctx, &cmd).await {
+                            println!("Error running modsearch: {:?}", e);
                         }
                     }
                     _ => {}
                 }
             }
 
-            // Pagination buttons
-            Interaction::MessageComponent(component) => {
-                if let Err(err) = modlist::handle_pagination(&ctx, &component).await {
-                    println!("Error handling pagination: {:?}", err);
+            // Pagination buttons for /modlist
+            Interaction::MessageComponent(comp) => {
+                if let Err(e) = modlist::handle_pagination(&ctx, &comp).await {
+                    println!("Error handling pagination: {:?}", e);
+                }
+            }
+
+            // Autocomplete for /modsearch
+            Interaction::Autocomplete(auto) => {
+                if let Err(e) = modsearch::autocomplete(&ctx, &auto).await {
+                    println!("Error handling autocomplete: {:?}", e);
                 }
             }
 

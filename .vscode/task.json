@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo watch",
+      "type": "shell",
+      "command": "cargo watch -x check",
+      "isBackground": true,
+      "problemMatcher": ["$rustc"]
+    }
+  ]
+}

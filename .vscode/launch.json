@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Skatebit Bot",
+      "type": "lldb", // Requires the CodeLLDB extension
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/skatebit-bot",
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

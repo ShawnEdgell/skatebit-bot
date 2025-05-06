@@ -1,3 +1,5 @@
+// src/commands/modlist.rs
+
 use serenity::builder::CreateApplicationCommand;
 use serenity::model::{
     application::command::CommandOptionType,
@@ -42,15 +44,23 @@ lazy_static::lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
 }
 
-/// Register the `/modlist` command (version alias only)
+/// Register the /modlist command (version alias + optional DM flag)
 pub fn register(cmd: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
     cmd.name("modlist")
        .description("Fetch mod list by alias (alpha, beta, or public)")
+       // version option
        .create_option(|opt| {
            opt.name("version")
               .description("Which version: alpha, beta, or public")
               .kind(CommandOptionType::String)
               .required(true)
+       })
+       // dm flag
+       .create_option(|opt| {
+           opt.name("dm")
+              .description("Send the full list via DM instead of ephemeral chat")
+              .kind(CommandOptionType::Boolean)
+              .required(false)
        })
 }
 
@@ -64,18 +74,24 @@ fn resolve_version(input: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Handle `/modlist` invocation and send paginated embed
+/// Handle /modlist invocation and send paginated embed
 pub async fn run(
     ctx: &Context,
     interaction: &ApplicationCommandInteraction,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Parse version alias
-    let input = interaction.data.options.get(0)
-        .and_then(|opt| opt.value.as_ref())
-        .and_then(|val| val.as_str())
-        .unwrap_or("");
+    let input = interaction.data.options.iter()
+        .find(|o| o.name == "version").unwrap()
+        .value.as_ref().unwrap().as_str().unwrap();
     let (label, version) = resolve_version(input)
         .ok_or("Invalid version alias")?;
+
+    // Parse DM flag
+    let dm_flag = interaction.data.options.iter()
+        .find(|o| o.name == "dm")
+        .and_then(|o| o.value.as_ref())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Fetch mod data
     let url = format!("https://skatebit-api.vercel.app/api/mods/{}", version);
@@ -113,23 +129,38 @@ pub async fn run(
         pages.push((title_text, desc));
     }
 
-    // Send initial embed ephemeral
+    // Send initial embed
     let (title, desc) = &pages[0];
-    interaction.create_interaction_response(&ctx.http, |resp| {
-        resp.kind(InteractionResponseType::ChannelMessageWithSource)
-            .interaction_response_data(|msg| {
-                msg.flags(MessageFlags::EPHEMERAL)
-                   .embed(|e| e.title(title).description(desc))
-                   .components(|c| c.create_action_row(|row| {
-                       row.create_button(|b| b.custom_id("prev").label("⏪ Prev").style(ButtonStyle::Primary))
-                          .create_button(|b| b.custom_id("next").label("Next ⏩").style(ButtonStyle::Primary))
-                   }))
-            })
-    }).await?;
-
-    // Store pagination state
-    let msg = interaction.get_interaction_response(&ctx.http).await?;
-    PAGINATED_DATA.lock().await.insert((interaction.user.id, msg.id), (pages, 0));
+    if dm_flag {
+        // Acknowledge then DM
+        interaction.create_interaction_response(&ctx.http, |resp| {
+            resp.kind(InteractionResponseType::ChannelMessageWithSource)
+                .interaction_response_data(|msg| msg.flags(MessageFlags::EPHEMERAL).content("✅ Sending mod list via DM!"))
+        }).await?;
+        let dm = interaction.user.create_dm_channel(&ctx.http).await?;
+        let sent = dm.send_message(&ctx.http, |m| m
+            .embed(|e| e.title(title).description(desc))
+            .components(|c| c.create_action_row(|row| {
+                row.create_button(|b| b.custom_id("prev").label("⏪ Prev").style(ButtonStyle::Primary))
+                   .create_button(|b| b.custom_id("next").label("Next ⏩").style(ButtonStyle::Primary))
+            })))
+            .await?;
+        PAGINATED_DATA.lock().await.insert((interaction.user.id, sent.id), (pages, 0));
+    } else {
+        // Ephemeral in-channel
+        interaction.create_interaction_response(&ctx.http, |resp| {
+            resp.kind(InteractionResponseType::ChannelMessageWithSource)
+                .interaction_response_data(|msg| msg.flags(MessageFlags::EPHEMERAL)
+                    .embed(|e| e.title(title).description(desc))
+                    .components(|c| c.create_action_row(|row| {
+                        row.create_button(|b| b.custom_id("prev").label("⏪ Prev").style(ButtonStyle::Primary))
+                           .create_button(|b| b.custom_id("next").label("Next ⏩").style(ButtonStyle::Primary))
+                    }))
+                )
+        }).await?;
+        let msg = interaction.get_interaction_response(&ctx.http).await?;
+        PAGINATED_DATA.lock().await.insert((interaction.user.id, msg.id), (pages, 0));
+    }
 
     Ok(())
 }
