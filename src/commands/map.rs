@@ -1,5 +1,6 @@
 use crate::types::ModioMap;
 use crate::utils::autocomplete::basic_autocomplete;
+use crate::utils::constants::BOT_EMBED_COLOR;
 
 use serenity::builder::CreateApplicationCommand;
 use serenity::client::Context;
@@ -8,10 +9,12 @@ use serenity::model::application::interaction::{
     autocomplete::AutocompleteInteraction,
     InteractionResponseType, MessageFlags,
 };
+use serenity::model::application::command::CommandOptionType;
 
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::time::Duration;
 use once_cell::sync::Lazy;
 
 #[derive(serde::Deserialize)]
@@ -19,7 +22,6 @@ struct ModioPage {
     maps: Vec<ModioMap>,
 }
 
-// Shared mod cache
 static MOD_CACHE: Lazy<Arc<RwLock<Vec<ModioMap>>>> = Lazy::new(|| Arc::new(RwLock::new(Vec::new())));
 
 pub fn register(cmd: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
@@ -28,7 +30,7 @@ pub fn register(cmd: &mut CreateApplicationCommand) -> &mut CreateApplicationCom
         .create_option(|opt| {
             opt.name("search")
                 .description("Search for a map by title")
-                .kind(serenity::model::application::command::CommandOptionType::String)
+                .kind(CommandOptionType::String)
                 .set_autocomplete(true)
                 .required(true)
         })
@@ -36,17 +38,65 @@ pub fn register(cmd: &mut CreateApplicationCommand) -> &mut CreateApplicationCom
 
 pub async fn load_cache() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut all_maps = Vec::new();
-    for page in 1..=12 {
-        let url = format!("https://modio-cache.vercel.app/maps_v2/page_{}.json", page);
-        let res = reqwest::get(&url).await?;
-        if res.status().is_success() {
-            let data: ModioPage = res.json().await?;
-            all_maps.extend(data.maps);
-        } else {
+    let client = reqwest::Client::new();
+    let base_url = "https://modio-cache.vercel.app/maps_v2/page_";
+    let mut last_successfully_fetched_page = 0;
+    let mut total_maps_loaded_this_run = 0;
+
+    for page_num in 1..=100 {
+        let url = format!("{}{}.json", base_url, page_num);
+
+        let response = match client.get(&url).send().await {
+            Ok(res) => res,
+            Err(e) => {
+                eprintln!("❌ Request error for {}: {:?}", url, e);
+                break;
+            }
+        };
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
             break;
         }
+
+        if !response.status().is_success() {
+            eprintln!("❌ Failed to fetch {}: Status {}", url, response.status());
+            break;
+        }
+
+        match response.json::<ModioPage>().await {
+            Ok(page_data) => {
+                if page_data.maps.is_empty() {
+                    last_successfully_fetched_page = page_num;
+                    break;
+                }
+                total_maps_loaded_this_run += page_data.maps.len();
+                all_maps.extend(page_data.maps);
+                last_successfully_fetched_page = page_num;
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to parse JSON for {}: {:?}", url, e);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    *MOD_CACHE.write().await = all_maps;
+
+    if total_maps_loaded_this_run > 0 {
+        let mut cache_writer = MOD_CACHE.write().await;
+        *cache_writer = all_maps;
+        println!(
+            "🗺️ Map cache updated successfully: {} maps from {} pages.",
+            total_maps_loaded_this_run, last_successfully_fetched_page
+        );
+    } else if last_successfully_fetched_page > 0 {
+        println!(
+            "ℹ️ Map cache check completed. No new maps found after checking {} pages. Cache remains unchanged or empty.",
+            last_successfully_fetched_page
+        );
+    } else {
+        eprintln!("❌ Map cache loading failed: Could not retrieve or parse the initial map page(s).");
+    }
+
     Ok(())
 }
 
@@ -66,17 +116,18 @@ pub async fn run(
         let author = entry.submitted_by.username.clone();
         let download_link = entry.modfile
             .as_ref()
-            .and_then(|mf| Some(mf.download.binary_url.clone()))
+            .map(|mf| mf.download.binary_url.clone())
             .unwrap_or_else(|| "No download link".to_string());
 
         let size = entry.modfile
             .as_ref()
             .and_then(|mf| mf.filesize.map(|s| format!("{:.2} MB", s as f64 / (1024.0 * 1024.0))))
-            .unwrap_or("Unknown".to_string());
+            .unwrap_or_else(|| "Unknown size".to_string());
 
         let tags = entry.tags.as_ref()
-            .map(|tags| tags.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", "))
-            .unwrap_or("No tags".to_string());
+            .filter(|tags_vec| !tags_vec.is_empty())
+            .map(|tags_vec| tags_vec.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", "))
+            .unwrap_or_else(|| "No tags".to_string());
 
         interaction.create_interaction_response(&ctx.http, |resp| {
             resp.kind(InteractionResponseType::ChannelMessageWithSource)
@@ -88,14 +139,12 @@ pub async fn run(
                             .field("Author", &author, true)
                             .field("Size", &size, true)
                             .field("Tags", &tags, false)
-                            .field("Link", format!("[Download]({})", download_link), false)
+                            .field("Link", format!("[Download Map]({})", download_link), false)
                             .image(
-                                entry
-                                    .logo
-                                    .thumb_1280x720
-                                    .as_deref()
-                                    .unwrap_or(&entry.logo.original)
+                                entry.logo.thumb_1280x720.as_deref()
+                                     .unwrap_or(&entry.logo.original)
                             )
+                            .color(BOT_EMBED_COLOR)
                     })
                 })
         }).await?;
@@ -108,7 +157,6 @@ pub async fn run(
                 })
         }).await?;
     }
-
     Ok(())
 }
 
@@ -119,14 +167,13 @@ pub async fn autocomplete(
     if inter.data.name != "map" {
         return Ok(());
     }
-
     basic_autocomplete(ctx, inter, "search", |prefix| {
-        let prefix = prefix.to_string().to_lowercase();
-        let cache = MOD_CACHE.clone();
+        let prefix_owned = prefix.to_string().to_lowercase();
+        let cache_clone = Arc::clone(&MOD_CACHE);
         async move {
-            let data = cache.read().await;
+            let data = cache_clone.read().await;
             Ok(data.iter()
-                .filter(|m| m.name.to_lowercase().contains(&prefix))
+                .filter(|m| m.name.to_lowercase().contains(&prefix_owned))
                 .map(|m| (m.name.clone(), m.name.clone()))
                 .take(25)
                 .collect())

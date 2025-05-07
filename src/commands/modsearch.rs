@@ -1,7 +1,9 @@
+// src/commands/modsearch.rs
 use crate::utils::mod_format::format_mod_entry;
 use crate::utils::mod_fetch::{resolve_version, fetch_mods};
 use crate::utils::interaction::get_str_option;
 use crate::utils::autocomplete::basic_autocomplete;
+use crate::utils::constants::BOT_EMBED_COLOR;
 
 use serenity::builder::CreateApplicationCommand;
 use serenity::model::{
@@ -43,7 +45,6 @@ pub async fn run(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let version_alias = get_str_option(command, "version").ok_or("Missing version")?;
     let code = resolve_version(version_alias).ok_or("Invalid version alias")?;
-
     let query = get_str_option(command, "query")
         .unwrap_or_default()
         .to_lowercase();
@@ -55,7 +56,11 @@ pub async fn run(
         command.create_interaction_response(&ctx.http, |resp| {
             resp.kind(InteractionResponseType::ChannelMessageWithSource)
                 .interaction_response_data(|data| {
-                    data.embed(|e| e.title(&entry.title).description(&desc))
+                    data.embed(|e| {
+                        e.title(&entry.title)
+                         .description(&desc)
+                         .color(BOT_EMBED_COLOR)
+                    })
                 })
         }).await?;
     } else {
@@ -67,7 +72,6 @@ pub async fn run(
                 })
         }).await?;
     }
-
     Ok(())
 }
 
@@ -78,21 +82,19 @@ pub async fn autocomplete(
     if inter.data.name != "modsearch" {
         return Ok(());
     }
-
     let version_alias = inter.data.options.iter()
         .find(|o| o.name == "version")
         .and_then(|o| o.value.as_ref())
         .and_then(|v| v.as_str())
         .unwrap_or("public");
-
     let code = resolve_version(version_alias).unwrap_or("12104");
 
     basic_autocomplete(ctx, inter, "query", move |prefix| {
-        let prefix = prefix.to_string().to_lowercase();
+        let prefix_owned = prefix.to_string().to_lowercase();
         async move {
-            let mods = fetch_mods(code).await?;
-            Ok(mods.into_iter()
-                .filter(|m| m.title.to_lowercase().contains(&prefix))
+            let mods_data = fetch_mods(code).await?;
+            Ok(mods_data.into_iter()
+                .filter(|m| m.title.to_lowercase().contains(&prefix_owned))
                 .map(|m| (m.title.clone(), m.title.clone()))
                 .take(25)
                 .collect())

@@ -1,137 +1,155 @@
 use crate::utils::mod_format::format_mod_entry;
 use crate::utils::mod_fetch::{resolve_version, fetch_mods};
-use crate::utils::components::pagination_buttons;
-use crate::utils::interaction::{get_str_option, get_bool_option};
 
 use serenity::builder::CreateApplicationCommand;
 use serenity::model::{
-    application::command::CommandOptionType,
     application::interaction::{
         application_command::ApplicationCommandInteraction,
         message_component::MessageComponentInteraction,
         InteractionResponseType,
         MessageFlags,
     },
-    prelude::{MessageId, UserId},
 };
 use serenity::client::Context;
+use tokio::time::Duration;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
-lazy_static::lazy_static! {
-    static ref PAGINATED_DATA: Arc<Mutex<HashMap<(UserId, MessageId), (Vec<(String, String)>, usize)>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-}
+const MAX_MODS_PER_EMBED: usize = 15;
+const EMBED_COLOR: u32 = 0x1eaeef;
 
 pub fn register(cmd: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
     cmd.name("modlist")
-        .description("Fetch mod list by alias (alpha, beta, or public)")
-        .create_option(|opt| {
-            opt.name("version")
-                .description("Which version: alpha, beta, or public")
-                .kind(CommandOptionType::String)
-                .required(true)
-                .add_string_choice("alpha", "alpha")
-                .add_string_choice("beta", "beta")
-                .add_string_choice("public", "public")
-        })
-        .create_option(|opt| {
-            opt.name("dm")
-                .description("Send the full list via DM instead of ephemeral chat")
-                .kind(CommandOptionType::Boolean)
-                .required(false)
-        })
+        .description("Sends you a DM to select and receive a mod list.")
 }
 
 pub async fn run(
     ctx: &Context,
     interaction: &ApplicationCommandInteraction,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let input = get_str_option(interaction, "version").ok_or("Missing version")?;
-    let version_code = resolve_version(input).ok_or("Invalid version alias")?;
-    let label = match input {
-        "alpha" => "Alpha",
-        "beta" => "Beta",
-        "public" => "Public",
-        _ => "Mods",
+    interaction
+        .create_interaction_response(&ctx.http, |resp| {
+            resp.kind(InteractionResponseType::ChannelMessageWithSource)
+                .interaction_response_data(|msg| {
+                    msg.flags(MessageFlags::EPHEMERAL)
+                        .content("📬 I've sent you a DM where you can select the mod list version!")
+                })
+        })
+        .await?;
+
+    let dm_channel_result = interaction.user.create_dm_channel(&ctx.http).await;
+    let dm_channel = match dm_channel_result {
+        Ok(channel) => channel,
+        Err(e) => {
+            eprintln!("Failed to create DM channel for {}: {:?}", interaction.user.id, e);
+            interaction.edit_original_interaction_response(&ctx.http, |msg| {
+                msg.content("⚠️ I couldn't send you a DM. Please ensure your DMs are open for this server.")
+                   .components(|c| c)
+            }).await?;
+            return Ok(());
+        }
     };
-    let mods = fetch_mods(version_code).await?;
-    let dm_flag = get_bool_option(interaction, "dm").unwrap_or(false);
 
-    let chunk_size = 4;
-    let mut pages = Vec::new();
-    for (i, chunk) in mods.chunks(chunk_size).enumerate() {
-        let desc = chunk.iter().map(format_mod_entry).collect::<Vec<_>>().join("\n\n");
-        let title = if i == 0 {
-            format!("{} Mod List", label)
-        } else {
-            format!("{} Mod List (Page {})", label, i + 1)
-        };
-        pages.push((title, desc));
-    }
-
-    let (title, desc) = &pages[0];
-
-    if dm_flag {
-        interaction.create_interaction_response(&ctx.http, |resp| {
-            resp.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|msg| {
-                    msg.flags(MessageFlags::EPHEMERAL)
-                        .content("✅ Sending mod list via DM!")
+    dm_channel
+        .send_message(&ctx.http, |msg| {
+            msg.content("Please select the mod list version you'd like to view:")
+                .components(|comp_builder| {
+                    comp_builder.create_action_row(|action_row| {
+                        action_row.create_select_menu(|select_menu| {
+                            select_menu
+                                .custom_id("modlist_version_select")
+                                .placeholder("Choose a version...")
+                                .options(|opt_builder| {
+                                    opt_builder.create_option(|opt| {
+                                        opt.label("Alpha Version")
+                                            .value("alpha")
+                                            .description("View the Alpha mod list (~23 mods)")
+                                    });
+                                    opt_builder.create_option(|opt| {
+                                        opt.label("Beta Version")
+                                            .value("beta")
+                                            .description("View the Beta mod list (~13 mods)")
+                                    });
+                                    opt_builder.create_option(|opt| {
+                                        opt.label("Public Version")
+                                            .value("public")
+                                            .description("View the Public mod list (~13 mods)")
+                                    })
+                                })
+                        })
+                    })
                 })
-        }).await?;
-
-        let dm = interaction.user.create_dm_channel(&ctx.http).await?;
-        let sent = dm.send_message(&ctx.http, |m| {
-            m.embed(|e| e.title(title).description(desc))
-             .components(|c| c.create_action_row(pagination_buttons))
-        }).await?;
-
-        PAGINATED_DATA.lock().await.insert((interaction.user.id, sent.id), (pages, 0));
-    } else {
-        interaction.create_interaction_response(&ctx.http, |resp| {
-            resp.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|msg| {
-                    msg.flags(MessageFlags::EPHEMERAL)
-                        .embed(|e| e.title(title).description(desc))
-                        .components(|c| c.create_action_row(pagination_buttons))
-                })
-        }).await?;
-
-        let msg = interaction.get_interaction_response(&ctx.http).await?;
-        PAGINATED_DATA.lock().await.insert((interaction.user.id, msg.id), (pages, 0));
-    }
-
+        })
+        .await?;
     Ok(())
 }
 
-pub async fn handle_pagination(
+pub async fn handle_version_selection_and_send_list(
     ctx: &Context,
-    component: &MessageComponentInteraction,
+    component_interaction: &MessageComponentInteraction,
+    selected_version_value: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut data = PAGINATED_DATA.lock().await;
-    let key = (component.user.id, component.message.id);
+    let mut original_message = component_interaction.message.clone();
+    original_message.edit(&ctx.http, |edit_msg| {
+        edit_msg.content(format!("⏳ Fetching the {} mod list for you...", selected_version_value))
+                .components(|c| c)
+    }).await?;
 
-    if let Some((pages, idx)) = data.get_mut(&key) {
-        match component.data.custom_id.as_str() {
-            "prev" if *idx > 0 => *idx -= 1,
-            "next" if *idx + 1 < pages.len() => *idx += 1,
-            _ => {}
-        }
+    let version_code = resolve_version(selected_version_value)
+        .ok_or_else(|| format!("Internal error: Invalid version value received: {}", selected_version_value))?;
 
-        let (title, desc) = &pages[*idx];
-        component.create_interaction_response(&ctx.http, |resp| {
-            resp.kind(InteractionResponseType::UpdateMessage)
-                .interaction_response_data(|m| m.embed(|e| e.title(title).description(desc)))
-        }).await?;
-    } else {
-        component.create_interaction_response(&ctx.http, |resp| {
-            resp.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|m| m.content("❌ Pagination data not found."))
-        }).await?;
+    let list_label = match selected_version_value {
+        "alpha" => "Alpha Version",
+        "beta" => "Beta Version",
+        "public" => "Public Version",
+        _ => "Selected Version",
+    };
+
+    let mods = fetch_mods(version_code).await?;
+    let dm_channel_id = component_interaction.channel_id;
+
+    if mods.is_empty() {
+        dm_channel_id
+            .say(&ctx.http, format!("ℹ️ No mods found for the {} list.", list_label))
+            .await?;
+        return Ok(());
     }
 
+    let total_mods = mods.len();
+    let mut embed_count = 0;
+    let num_pages = (total_mods as f32 / MAX_MODS_PER_EMBED as f32).ceil() as usize;
+
+    for (chunk_index, mod_chunk) in mods.chunks(MAX_MODS_PER_EMBED).enumerate() {
+        embed_count += 1;
+        let mut description = String::new();
+        for (item_index, mod_entry) in mod_chunk.iter().enumerate() {
+            description.push_str(&format_mod_entry(mod_entry));
+            if item_index < mod_chunk.len() - 1 {
+                description.push_str("\n\n---\n\n");
+            }
+        }
+
+        if description.is_empty() { continue; }
+        if description.len() > 4096 {
+            eprintln!("Warning: Embed description for a chunk is too long. Truncating.");
+            description.truncate(4090);
+            description.push_str("...");
+        }
+
+        let title = format!("{} Mod List (Page {} of {})", list_label, embed_count, num_pages);
+
+        dm_channel_id.send_message(&ctx.http, |m| {
+            m.embed(|e| {
+                e.title(&title)
+                 .description(&description)
+                 .color(EMBED_COLOR)
+                 .footer(|f| f.text(format!("{} mods in this part | Total: {}", mod_chunk.len(), total_mods)))
+            })
+        }).await?;
+
+        if chunk_index < (num_pages - 1) {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
+    }
+
+    dm_channel_id.say(&ctx.http, format!("☑️ End of {} mod list.", list_label)).await?;
     Ok(())
 }
