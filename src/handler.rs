@@ -1,17 +1,14 @@
 use serenity::{
     async_trait,
+    client::{Context, EventHandler},
     model::{
+        application::command::Command,
         application::interaction::Interaction,
         gateway::Ready,
-        id::GuildId,
-        application::command::Command,
     },
-    client::{Context, EventHandler},
 };
 
-use crate::commands::{modlist, modsearch, ping};
-
-const GUILD_ID: u64 = 663764960202981435;
+use crate::commands::{map, modlist, modsearch, ping};
 
 pub struct Handler;
 
@@ -20,9 +17,7 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
         println!("✅ Bot is connected!");
 
-        let guild_id = GuildId(GUILD_ID);
-
-        // Optional: Clear old global commands
+        // Optional: Clear old global commands (useful when renaming or removing commands)
         if let Ok(old_commands) = Command::get_global_application_commands(&ctx.http).await {
             for cmd in old_commands {
                 let _ = Command::delete_global_application_command(&ctx.http, cmd.id).await;
@@ -30,15 +25,17 @@ impl EventHandler for Handler {
             println!("🧹 Removed old global commands.");
         }
 
-        if let Err(e) = guild_id.set_application_commands(&ctx.http, |commands| {
+        // Register global application commands
+        if let Err(e) = Command::set_global_application_commands(&ctx.http, |commands| {
             commands
                 .create_application_command(|cmd| ping::register(cmd))
                 .create_application_command(|cmd| modlist::register(cmd))
                 .create_application_command(|cmd| modsearch::register(cmd))
+                .create_application_command(|cmd| map::register(cmd))
         }).await {
-            println!("❌ Failed to register commands: {:?}", e);
+            println!("❌ Failed to register global commands: {:?}", e);
         } else {
-            println!("📦 Guild commands registered.");
+            println!("🌐 Global commands registered.");
         }
     }
 
@@ -59,6 +56,11 @@ impl EventHandler for Handler {
                             println!("❌ Error running modsearch: {:?}", e);
                         }
                     }
+                    "map" => {
+                        if let Err(e) = map::run(&ctx, &cmd).await {
+                            println!("❌ Error running map: {:?}", e);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -68,8 +70,18 @@ impl EventHandler for Handler {
                 }
             }
             Interaction::Autocomplete(auto) => {
-                if let Err(e) = modsearch::autocomplete(&ctx, &auto).await {
-                    println!("❌ Error handling autocomplete: {:?}", e);
+                match auto.data.name.as_str() {
+                    "modsearch" => {
+                        if let Err(e) = modsearch::autocomplete(&ctx, &auto).await {
+                            println!("❌ Error handling modsearch autocomplete: {:?}", e);
+                        }
+                    }
+                    "map" => {
+                        if let Err(e) = map::autocomplete(&ctx, &auto).await {
+                            println!("❌ Error handling map autocomplete: {:?}", e);
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}

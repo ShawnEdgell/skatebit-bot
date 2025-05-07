@@ -1,3 +1,5 @@
-pub mod ping;
-pub mod modlist;
+pub mod map;
 pub mod modsearch;
+pub mod modlist;
+pub mod ping;
+
