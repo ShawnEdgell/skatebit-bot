@@ -1,6 +1,7 @@
-// src/lib.rs
-use serenity::prelude::GatewayIntents;
-use serenity::Client;
+use serenity::{
+    prelude::GatewayIntents,
+    Client,
+};
 use dotenvy::dotenv;
 use std::env;
 use tokio::time::{sleep, Duration};
@@ -11,24 +12,25 @@ mod utils;
 mod types;
 
 use handler::Handler;
-use commands::map;
 
 pub async fn start() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dotenv().ok();
-    let token = env::var("DISCORD_TOKEN")
-        .expect("Expected DISCORD_TOKEN in env");
-    println!("Starting with token {}…", &token[..5]);
 
-    // Load map cache before bot starts
+    let token = env::var("DISCORD_TOKEN").expect("Expected DISCORD_TOKEN in env");
+    println!("Starting with token {}…", if token.len() >= 5 { &token[..5] } else { "INVALID_TOKEN_TOO_SHORT" });
+
     println!("📦 Loading map cache...");
-    map::load_cache().await?;
+    if let Err(e) = crate::commands::map::load_cache().await {
+        eprintln!("❌ Failed to initially load map cache: {:?}", e);
+    } else {
+        println!("✅ Initial map cache loaded.");
+    }
 
-    // Refresh map cache every 6 hours
     tokio::spawn(async {
         loop {
             sleep(Duration::from_secs(60 * 60 * 6)).await;
             println!("🔁 Refreshing map cache...");
-            if let Err(e) = map::load_cache().await {
+            if let Err(e) = crate::commands::map::load_cache().await {
                 eprintln!("❌ Failed to refresh map cache: {:?}", e);
             } else {
                 println!("✅ Map cache refreshed.");
@@ -36,10 +38,20 @@ pub async fn start() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
-    let mut client = Client::builder(&token, GatewayIntents::all())
-        .event_handler(Handler)
-        .await?;
+    let mut intents = GatewayIntents::GUILDS;
+    intents |= GatewayIntents::DIRECT_MESSAGES;
 
-    client.start().await?;
+    println!("ℹ️ Using intents: {:?}", intents);
+
+    let mut client = Client::builder(&token, intents)
+        .event_handler(Handler)
+        .await
+        .expect("Error creating Serenity client");
+
+    if let Err(why) = client.start().await {
+        eprintln!("❌ Client error during startup: {:?}", why);
+        return Err(Box::new(why));
+    }
+
     Ok(())
 }

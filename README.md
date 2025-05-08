@@ -2,8 +2,6 @@
 
 The official Discord bot for Skatebit, providing fast, up-to-date access to Skater XL mods directly in Discord.
 
-ModFinder lets you browse and search Skater XL maps and mods, pulling data from Skatebit's API and mod.io cache. Whether you're looking for a new map, a specific mod, or just exploring, ModFinder makes it easy.
-
 ## ⚙️ Features
 
 - **Browse Full Mod Lists:**  
@@ -15,7 +13,7 @@ ModFinder lets you browse and search Skater XL maps and mods, pulling data from 
 - **Easy Invite:**  
   Global commands mean you can invite ModFinder to any server and start using it instantly.
 
-## 💬 Commands Reference
+## 💬 Commands
 
 ### /ping
 

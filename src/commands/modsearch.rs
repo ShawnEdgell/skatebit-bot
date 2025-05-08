@@ -1,103 +1,114 @@
-// src/commands/modsearch.rs
-use crate::utils::mod_format::format_mod_entry;
-use crate::utils::mod_fetch::{resolve_version, fetch_mods};
-use crate::utils::interaction::get_str_option;
-use crate::utils::autocomplete::basic_autocomplete;
-use crate::utils::constants::BOT_EMBED_COLOR;
-
-use serenity::builder::CreateApplicationCommand;
-use serenity::model::{
-    application::command::CommandOptionType,
-    application::interaction::{
-        application_command::ApplicationCommandInteraction,
-        autocomplete::AutocompleteInteraction,
-        InteractionResponseType,
-        MessageFlags,
+use crate::{
+    types::ModEntry,
+    utils::{
+        mod_format::format_mod_entry,
+        mod_fetch::{resolve_version, fetch_mods},
+        interaction::get_str_option,
+        autocomplete::basic_autocomplete,
+        constants::BOT_EMBED_COLOR,
     },
 };
-use serenity::client::Context;
+
+use serenity::{
+    builder::{
+        CreateCommand, CreateCommandOption, CreateEmbed,
+        CreateInteractionResponse, CreateInteractionResponseMessage,
+    },
+    model::{
+        application::{CommandInteraction, CommandOptionType, CommandDataOptionValue},
+    },
+    client::Context,
+};
 use std::error::Error;
 
-pub fn register(cmd: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
-    cmd.name("modsearch")
+pub fn register() -> CreateCommand {
+    CreateCommand::new("modsearch")
         .description("Search for a mod by title within a specific version branch")
-        .create_option(|opt| {
-            opt.name("version")
-                .description("Which version: alpha, beta, public")
-                .kind(CommandOptionType::String)
-                .add_string_choice("alpha", "alpha")
-                .add_string_choice("beta", "beta")
-                .add_string_choice("public", "public")
-                .required(true)
-        })
-        .create_option(|opt| {
-            opt.name("query")
-                .description("Keyword to search in mod titles")
-                .kind(CommandOptionType::String)
-                .set_autocomplete(true)
-                .required(true)
-        })
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::String,
+                "version",
+                "Which version: alpha, beta, public",
+            )
+            .add_string_choice("Alpha", "alpha")
+            .add_string_choice("Beta", "beta")
+            .add_string_choice("Public", "public")
+            .required(true),
+        )
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::String,
+                "query",
+                "Keyword to search in mod titles",
+            )
+            .set_autocomplete(true)
+            .required(true),
+        )
 }
 
 pub async fn run(
     ctx: &Context,
-    command: &ApplicationCommandInteraction,
+    interaction: &CommandInteraction,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let version_alias = get_str_option(command, "version").ok_or("Missing version")?;
-    let code = resolve_version(version_alias).ok_or("Invalid version alias")?;
-    let query = get_str_option(command, "query")
+    let version_alias = get_str_option(interaction, "version").ok_or("Missing version option")?;
+    let code = resolve_version(version_alias).ok_or_else(|| format!("Invalid version alias: {}", version_alias))?;
+    let query = get_str_option(interaction, "query")
         .unwrap_or_default()
         .to_lowercase();
 
-    let mods = fetch_mods(code).await?;
+    let mods: Vec<ModEntry> = fetch_mods(code).await?;
+
+    let response_message: CreateInteractionResponseMessage;
 
     if let Some(entry) = mods.into_iter().find(|m| m.title.to_lowercase().contains(&query)) {
         let desc = format_mod_entry(&entry);
-        command.create_interaction_response(&ctx.http, |resp| {
-            resp.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|data| {
-                    data.embed(|e| {
-                        e.title(&entry.title)
-                         .description(&desc)
-                         .color(BOT_EMBED_COLOR)
-                    })
-                })
-        }).await?;
+        let embed = CreateEmbed::new()
+            .title(&entry.title)
+            .description(&desc)
+            .color(BOT_EMBED_COLOR);
+        response_message = CreateInteractionResponseMessage::new().add_embed(embed);
     } else {
-        command.create_interaction_response(&ctx.http, |resp| {
-            resp.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|data| {
-                    data.flags(MessageFlags::EPHEMERAL)
-                        .content("No matching mod found in the specified version.")
-                })
-        }).await?;
+        response_message = CreateInteractionResponseMessage::new()
+            .content("No matching mod found in the specified version.")
+            .ephemeral(true);
     }
+
+    let response = CreateInteractionResponse::Message(response_message);
+    interaction.create_response(&ctx.http, response).await?;
     Ok(())
 }
 
 pub async fn autocomplete(
     ctx: &Context,
-    inter: &AutocompleteInteraction,
+    interaction: &CommandInteraction,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    if inter.data.name != "modsearch" {
-        return Ok(());
-    }
-    let version_alias = inter.data.options.iter()
-        .find(|o| o.name == "version")
-        .and_then(|o| o.value.as_ref())
-        .and_then(|v| v.as_str())
-        .unwrap_or("public");
+    let version_alias_opt = interaction.data.options.iter().find_map(|opt| {
+        if opt.name == "version" {
+            if let CommandDataOptionValue::String(s_val) = &opt.value {
+                Some(s_val.as_str())
+            } else { None }
+        } else { None }
+    });
+
+    let version_alias = version_alias_opt.unwrap_or("public");
     let code = resolve_version(version_alias).unwrap_or("12104");
 
-    basic_autocomplete(ctx, inter, "query", move |prefix| {
-        let prefix_owned = prefix.to_string().to_lowercase();
+    basic_autocomplete(ctx, interaction, "query", move |current_query_input| {
+        let query_owned = current_query_input.to_string().to_lowercase();
         async move {
-            let mods_data = fetch_mods(code).await?;
-            Ok(mods_data.into_iter()
-                .filter(|m| m.title.to_lowercase().contains(&prefix_owned))
-                .map(|m| (m.title.clone(), m.title.clone()))
-                .take(25)
-                .collect())
+            match fetch_mods(code).await {
+                Ok(mods_data) => Ok(mods_data
+                    .into_iter()
+                    .filter(|m| m.title.to_lowercase().contains(&query_owned))
+                    .map(|m| (m.title.clone(), m.title.clone()))
+                    .take(25)
+                    .collect()),
+                Err(e) => {
+                    eprintln!("Error fetching mods for autocomplete: {:?}", e);
+                    Ok(Vec::new())
+                }
+            }
         }
-    }).await
+    })
+    .await
 }

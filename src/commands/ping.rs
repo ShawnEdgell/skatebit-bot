@@ -1,27 +1,29 @@
-// src/commands/ping.rs
-use serenity::builder::CreateApplicationCommand;
-use serenity::client::Context;
-use serenity::model::application::interaction::application_command::ApplicationCommandInteraction;
-use serenity::model::application::interaction::InteractionResponseType;
-use crate::utils::constants::BOT_EMBED_COLOR; // Assuming you have this for color
+use serenity::{
+    builder::{
+        CreateCommand,
+        CreateInteractionResponse,
+        CreateInteractionResponseMessage,
+        CreateEmbed,
+    },
+    client::Context,
+    model::application::CommandInteraction,
+};
+use crate::utils::constants::BOT_EMBED_COLOR;
 
-pub fn register(cmd: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
-    cmd.name("ping")
-        .description("A simple command to check if the bot is responding.") // Updated description
+pub fn register() -> CreateCommand {
+    CreateCommand::new("ping")
+        .description("A simple command to check if the bot is responding.")
 }
 
-pub async fn run(ctx: &Context, interaction: &ApplicationCommandInteraction) {
-    if let Err(e) = interaction.create_interaction_response(&ctx.http, |r| {
-        r.kind(InteractionResponseType::ChannelMessageWithSource)
-            .interaction_response_data(|m| {
-                m.embed(|e| {
-                    e.title("🏓 Pong!")
-                     // Optional: Add a minimal description if desired
-                     // e.description("Bot is online and responding.")
-                     .color(BOT_EMBED_COLOR) // Use your theme color
-                })
-            })
-    }).await {
+pub async fn run(ctx: &Context, interaction: &CommandInteraction) {
+    let embed = CreateEmbed::new()
+        .title("🏓 Pong!")
+        .color(BOT_EMBED_COLOR);
+
+    let response_message = CreateInteractionResponseMessage::new().add_embed(embed);
+    let response = CreateInteractionResponse::Message(response_message);
+
+    if let Err(e) = interaction.create_response(&ctx.http, response).await {
         eprintln!("Error sending ping response: {:?}", e);
     }
 }

@@ -1,9 +1,26 @@
-// src/utils/interaction.rs
-use serenity::model::application::interaction::application_command::ApplicationCommandInteraction;
+use serenity::model::application::{
+    CommandInteraction,
+    CommandDataOption,
+    CommandDataOptionValue,
+};
 
-pub fn get_str_option<'a>(command: &'a ApplicationCommandInteraction, name: &str) -> Option<&'a str> {
-    command.data.options.iter()
-        .find(|o| o.name == name)
-        .and_then(|o| o.value.as_ref())
-        .and_then(|v| v.as_str())
+pub fn get_str_option<'a>(
+    interaction: &'a CommandInteraction,
+    name: &str,
+) -> Option<&'a str> {
+    interaction
+        .data
+        .options
+        .iter()
+        .find_map(|opt: &CommandDataOption| {
+            if opt.name == name {
+                if let CommandDataOptionValue::String(s_val) = &opt.value {
+                    Some(s_val.as_str())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
 }

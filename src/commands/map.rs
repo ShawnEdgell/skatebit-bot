@@ -1,18 +1,23 @@
-use crate::types::ModioMap;
-use crate::utils::autocomplete::basic_autocomplete;
-use crate::utils::constants::BOT_EMBED_COLOR;
-
-use serenity::builder::CreateApplicationCommand;
-use serenity::client::Context;
-use serenity::model::application::interaction::{
-    application_command::ApplicationCommandInteraction,
-    autocomplete::AutocompleteInteraction,
-    InteractionResponseType, MessageFlags,
+use crate::{
+    types::ModioMap,
+    utils::{
+        autocomplete::basic_autocomplete,
+        constants::BOT_EMBED_COLOR,
+        interaction::get_str_option,
+    },
 };
-use serenity::model::application::command::CommandOptionType;
 
-use std::error::Error;
-use std::sync::Arc;
+use serenity::{
+    builder::{
+        CreateCommand, CreateCommandOption, CreateEmbed,
+        CreateInteractionResponse, CreateInteractionResponseMessage
+    },
+    client::Context,
+    model::application::{
+        CommandInteraction, CommandOptionType,
+    },
+};
+use std::{error::Error, sync::Arc};
 use tokio::sync::RwLock;
 use tokio::time::Duration;
 use once_cell::sync::Lazy;
@@ -24,16 +29,18 @@ struct ModioPage {
 
 static MOD_CACHE: Lazy<Arc<RwLock<Vec<ModioMap>>>> = Lazy::new(|| Arc::new(RwLock::new(Vec::new())));
 
-pub fn register(cmd: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
-    cmd.name("map")
+pub fn register() -> CreateCommand {
+    CreateCommand::new("map")
         .description("Search maps from mod.io")
-        .create_option(|opt| {
-            opt.name("search")
-                .description("Search for a map by title")
-                .kind(CommandOptionType::String)
-                .set_autocomplete(true)
-                .required(true)
-        })
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::String,
+                "search",
+                "Search for a map by title",
+            )
+            .set_autocomplete(true)
+            .required(true),
+        )
 }
 
 pub async fn load_cache() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -65,8 +72,8 @@ pub async fn load_cache() -> Result<(), Box<dyn Error + Send + Sync>> {
 
         match response.json::<ModioPage>().await {
             Ok(page_data) => {
-                if page_data.maps.is_empty() {
-                    last_successfully_fetched_page = page_num;
+                if page_data.maps.is_empty() && page_num > 1 {
+                    last_successfully_fetched_page = page_num -1;
                     break;
                 }
                 total_maps_loaded_this_run += page_data.maps.len();
@@ -88,13 +95,13 @@ pub async fn load_cache() -> Result<(), Box<dyn Error + Send + Sync>> {
             "🗺️ Map cache updated successfully: {} maps from {} pages.",
             total_maps_loaded_this_run, last_successfully_fetched_page
         );
-    } else if last_successfully_fetched_page > 0 {
+    } else if last_successfully_fetched_page > 0 && total_maps_loaded_this_run == 0 {
         println!(
-            "ℹ️ Map cache check completed. No new maps found after checking {} pages. Cache remains unchanged or empty.",
+            "ℹ️ Map cache check completed. No new maps found after checking {} pages. Cache remains unchanged.",
             last_successfully_fetched_page
         );
-    } else {
-        eprintln!("❌ Map cache loading failed: Could not retrieve or parse the initial map page(s).");
+    } else if last_successfully_fetched_page == 0 && total_maps_loaded_this_run == 0 {
+        eprintln!("❌ Map cache loading failed: Could not retrieve or parse the initial map page(s). Ensure the source is available.");
     }
 
     Ok(())
@@ -102,81 +109,77 @@ pub async fn load_cache() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 pub async fn run(
     ctx: &Context,
-    interaction: &ApplicationCommandInteraction,
+    interaction: &CommandInteraction,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let query = interaction.data.options.iter()
-        .find(|o| o.name == "search")
-        .and_then(|o| o.value.as_ref())
-        .and_then(|v| v.as_str())
+    let query = get_str_option(interaction, "search")
         .unwrap_or("")
         .to_lowercase();
 
     let cache = MOD_CACHE.read().await;
+    let response_message: CreateInteractionResponseMessage;
+
     if let Some(entry) = cache.iter().find(|m| m.name.to_lowercase().contains(&query)) {
         let author = entry.submitted_by.username.clone();
-        let download_link = entry.modfile
+        let download_link = entry
+            .modfile
             .as_ref()
             .map(|mf| mf.download.binary_url.clone())
             .unwrap_or_else(|| "No download link".to_string());
 
-        let size = entry.modfile
+        let size = entry
+            .modfile
             .as_ref()
             .and_then(|mf| mf.filesize.map(|s| format!("{:.2} MB", s as f64 / (1024.0 * 1024.0))))
             .unwrap_or_else(|| "Unknown size".to_string());
 
-        let tags = entry.tags.as_ref()
+        let tags = entry
+            .tags
+            .as_ref()
             .filter(|tags_vec| !tags_vec.is_empty())
             .map(|tags_vec| tags_vec.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", "))
             .unwrap_or_else(|| "No tags".to_string());
 
-        interaction.create_interaction_response(&ctx.http, |resp| {
-            resp.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|msg| {
-                    msg.embed(|e| {
-                        e.title(&entry.name)
-                            .description(&entry.summary)
-                            .url(&entry.profile_url)
-                            .field("Author", &author, true)
-                            .field("Size", &size, true)
-                            .field("Tags", &tags, false)
-                            .field("Link", format!("[Download Map]({})", download_link), false)
-                            .image(
-                                entry.logo.thumb_1280x720.as_deref()
-                                     .unwrap_or(&entry.logo.original)
-                            )
-                            .color(BOT_EMBED_COLOR)
-                    })
-                })
-        }).await?;
+        let embed = CreateEmbed::new()
+            .title(&entry.name)
+            .description(&entry.summary)
+            .url(&entry.profile_url)
+            .field("Author", &author, true)
+            .field("Size", &size, true)
+            .field("Tags", &tags, false)
+            .field("Link", format!("[Download Map]({})", download_link), false)
+            .image(
+                entry.logo.thumb_1280x720.as_deref()
+                    .unwrap_or(&entry.logo.original)
+            )
+            .color(BOT_EMBED_COLOR);
+        response_message = CreateInteractionResponseMessage::new().add_embed(embed);
     } else {
-        interaction.create_interaction_response(&ctx.http, |resp| {
-            resp.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|msg| {
-                    msg.flags(MessageFlags::EPHEMERAL)
-                        .content("❌ No map found for that query.")
-                })
-        }).await?;
+        response_message = CreateInteractionResponseMessage::new()
+            .content("❌ No map found for that query.")
+            .ephemeral(true);
     }
+
+    let response = CreateInteractionResponse::Message(response_message);
+    interaction.create_response(&ctx.http, response).await?;
     Ok(())
 }
 
 pub async fn autocomplete(
     ctx: &Context,
-    inter: &AutocompleteInteraction,
+    interaction: &CommandInteraction,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    if inter.data.name != "map" {
-        return Ok(());
-    }
-    basic_autocomplete(ctx, inter, "search", |prefix| {
-        let prefix_owned = prefix.to_string().to_lowercase();
+    basic_autocomplete(ctx, interaction, "search", |current_search_input| {
+        let query_owned = current_search_input.to_string().to_lowercase();
         let cache_clone = Arc::clone(&MOD_CACHE);
         async move {
             let data = cache_clone.read().await;
-            Ok(data.iter()
-                .filter(|m| m.name.to_lowercase().contains(&prefix_owned))
+            Ok(data
+                .iter()
+                .filter(|m| m.name.to_lowercase().contains(&query_owned))
                 .map(|m| (m.name.clone(), m.name.clone()))
                 .take(25)
                 .collect())
         }
-    }).await
+    })
+    .await
 }

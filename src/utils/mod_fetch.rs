@@ -1,4 +1,3 @@
-// src/utils/mod_fetch.rs
 use crate::types::ModEntry;
 use reqwest::Client;
 
