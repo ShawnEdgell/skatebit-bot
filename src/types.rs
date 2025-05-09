@@ -1,11 +1,15 @@
+// src/types.rs
+use poise::ChoiceParameter;
 use serde::Deserialize;
 use std::{collections::HashMap, fmt, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
 use reqwest::Client;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ChoiceParameter)]
 pub enum ModVersionBranch {
+    #[name = "Alpha"]
     Alpha,
+    #[name = "Beta/Public"]
     BetaPublic,
 }
 

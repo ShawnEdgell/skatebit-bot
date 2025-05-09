@@ -42,7 +42,7 @@ pub fn format_mod_entry(mod_entry: &ModEntry) -> String {
     let features = mod_entry.features.as_ref().map(|f| if f.is_empty() { "N/A".to_string() } else { f.join(", ") }).unwrap_or_else(|| "N/A".to_string());
     let note = mod_entry.note.as_deref().unwrap_or("");
     let note_line = if note.is_empty() { String::new() } else { format!("**Note:** {}\n", note) };
-    let downloads = mod_entry.download_links.as_ref().filter(|links| !links.is_empty()).map(|links| { links.iter().map(|l| format!("[{}]({})", l.label, l.url)).collect::<Vec<_>>().join(" | ") }).map(|s| format!("Links: {}", s)).unwrap_or_else(|| "".to_string());
+    let downloads = mod_entry.download_links.as_ref().filter(|links| !links.is_empty()).map(|links| { links.iter().map(|l| format!("[{}]({})", l.label, l.url)).collect::<Vec<_>>().join(" | ") }).map(|s| format!("**Links:** {}", s)).unwrap_or_else(|| "".to_string());
 
     format!(
         "**Author:** {}\n**Mod Version:** {}\n**Game Version:** {}\n**Keybind:** {}\n**Features:** {}\n{}{}",

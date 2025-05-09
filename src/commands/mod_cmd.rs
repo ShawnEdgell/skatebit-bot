@@ -9,7 +9,6 @@ use poise::{
 use std::str::FromStr;
 use tracing::{info, warn, error};
 
-// Autocomplete suggests "Title - BranchName" using the 2-variant enum's Display
 async fn mod_title_autocomplete(
     ctx: Context<'_>,
     partial: &str,
@@ -18,15 +17,13 @@ async fn mod_title_autocomplete(
     let mut suggestions = Vec::new();
     let partial_lowercase = partial.to_lowercase();
 
-    // Iterate through both slugs in cache to provide combined suggestions
     for (slug, mods) in mod_cache_guard.iter() {
         // Determine branch enum variant from slug
         let version_enum = match slug.as_str() {
             "1228" => ModVersionBranch::Alpha,
             "12104" => ModVersionBranch::BetaPublic,
-            _ => continue, // Skip unknown slugs if any
+            _ => continue,
         };
-        // Use the enum's Display impl for the label ("Alpha" or "Beta/Public")
         let branch_name = version_enum.to_string();
 
         for entry in mods {
@@ -38,25 +35,24 @@ async fn mod_title_autocomplete(
                 };
                 let suggestion = format!("{} - {}", display_title, branch_name);
                 suggestions.push(suggestion[..suggestion.len().min(100)].to_string());
-                if suggestions.len() >= 25 { break; } // Exit inner loop
+                if suggestions.len() >= 25 { break; }
             }
         }
-        if suggestions.len() >= 25 { break; } // Exit outer loop
+        if suggestions.len() >= 25 { break; }
     }
     suggestions
 }
 
+/// Searches the working mod lists for a specific mod.
 #[poise::command(slash_command, prefix_command, rename = "mod")]
-pub async fn modsearch( // Original function name is fine
+pub async fn modsearch( 
     ctx: Context<'_>,
     #[description = "Mod Title (use autocomplete for version)"]
     #[autocomplete = "mod_title_autocomplete"]
-    // ONLY the combined search string parameter
     search: String,
 ) -> Result<(), Error> {
     info!(user = %ctx.author().name, search_term = %search, "Mod command received");
 
-    // Parse the combined input string
     let (target_title, target_branch_name) =
         if let Some(separator_index) = search.rfind(" - ") {
             let (title_part, branch_part) = search.split_at(separator_index);
@@ -70,13 +66,11 @@ pub async fn modsearch( // Original function name is fine
              return Ok(());
         };
 
-    // Parse the extracted branch name using the FromStr impl for the 2-variant enum
     let version_enum = match ModVersionBranch::from_str(target_branch_name) {
          Ok(v) => v,
          Err(_) => {
              warn!(user = %ctx.author().name, search_term = %search, parsed_branch = %target_branch_name, "Invalid branch name parsed from search query");
              let reply = CreateReply::default()
-                 // Use the enum's Display for the error message examples
                  .content(format!("Invalid branch name '{}' found. Use autocomplete or 'Alpha', 'Beta', 'Public', 'Beta/Public'.", target_branch_name))
                  .ephemeral(true);
              ctx.send(reply).await?;
@@ -84,15 +78,12 @@ pub async fn modsearch( // Original function name is fine
          }
     };
 
-    // Resolve the 2-variant enum to the correct slug
     let version_slug = mod_utils::resolve_version_slug(version_enum);
 
     let mod_cache_guard = ctx.data().mod_cache.read().await;
 
-    // Look up the correct slug ("1228" or "12104") in the cache
     let reply = if let Some(mods) = mod_cache_guard.get(version_slug) {
          info!(fetched_count = mods.len(), %target_title, version = %version_enum, "Using cached mods, proceeding to filter.");
-        // Find exact match for the PARSED title in the correct version's list
         let matches: Vec<&ModEntry> = mods.iter().filter(|m| m.title.eq_ignore_ascii_case(target_title)).collect();
          info!(matched_count = matches.len(), %target_title, version = %version_enum, "Filtering complete.");
          if matches.is_empty() && !mods.is_empty() { warn!(query=%target_title, version=%version_enum, "Filter yielded no results"); }

@@ -2,10 +2,11 @@ pub mod commands;
 pub mod types;
 pub mod map_cache;
 pub mod mod_utils;
+pub mod scheduler;
 
 use poise::serenity_prelude as serenity;
-use serenity::model::id::GuildId;
-use std::{collections::HashMap, env};
+// GuildId is no longer needed here for command registration
+use std::{collections::HashMap, env, sync::Arc};
 use dotenvy::dotenv;
 use types::{Data, Error as AppError};
 use anyhow::{Context as AnyhowContext, Result as AnyhowResult};
@@ -23,19 +24,24 @@ pub async fn run() -> AnyhowResult<()> {
         .map_err(|e| { error!("Missing DISCORD_TOKEN: {}", e); e })
         .context("Missing DISCORD_TOKEN in the environment")?;
 
+    // GUILD_ID is no longer strictly needed for global command registration
+    // If you use it for other purposes, you can keep its loading logic.
+    // For now, I'm commenting it out as it's not used in this file anymore.
+    /*
     let guild_id_str = env::var("GUILD_ID")
         .map_err(|e| { error!("Missing GUILD_ID: {}", e); e })
         .context("Missing GUILD_ID in the environment")?;
-
     let guild_id_val = guild_id_str.parse::<u64>()
         .map_err(|e| { error!("GUILD_ID not a valid u64: '{}', {}", guild_id_str, e); e })
         .with_context(|| format!("GUILD_ID is not a valid u64 integer: '{}'", guild_id_str))?;
-    let guild_id = GuildId::new(guild_id_val);
+    let _guild_id = serenity::model::id::GuildId::new(guild_id_val); // Marked as unused if only for registration
+    */
 
     let intents = serenity::GatewayIntents::non_privileged()
         | serenity::GatewayIntents::MESSAGE_CONTENT;
 
-    let app_data = Data::new();
+    let app_data = Arc::new(Data::new());
+    let app_data_for_scheduler = app_data.clone();
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -54,56 +60,59 @@ pub async fn run() -> AnyhowResult<()> {
             on_error: |error| Box::pin(on_error(error)),
             ..Default::default()
         })
-        .setup(move |ctx, ready, framework| {
+        .setup(move |ctx, ready, framework_ref| {
             let data_for_setup = app_data.clone();
             Box::pin(async move {
                 info!("Logged in as {}! (User ID: {})", ready.user.name, ready.user.id);
 
-                info!("Attempting to clear old global application commands...");
-                poise::builtins::register_globally(ctx, &[] as &[poise::Command<Data, AppError>]).await
-                    .map_err(|e| { warn!(error = %e, "Failed attempt to clear global commands"); e })
-                    .context("Failed to clear global commands")
-                    .ok();
+                // Initial cache loading (remains the same)
+                match map_cache::load_maps_from_remote(&data_for_setup.http_client).await {
+                    Ok(maps) => {
+                        let map_count = maps.len();
+                        *data_for_setup.map_cache.write().await = maps;
+                        info!("Initial map cache populated with {} maps.", map_count);
+                    }
+                    Err(e) => { error!(error = %e, "Failed initial map cache load during setup."); }
+                }
 
-                let maps = map_cache::load_maps_from_remote(&data_for_setup.http_client).await
-                     .context("Failed to populate map cache during setup")?;
-                *data_for_setup.map_cache.write().await = maps;
-                info!("Map cache populated with {} maps.", data_for_setup.map_cache.read().await.len());
-
-
-                info!("Populating mod cache for defined versions...");
+                info!("Populating initial mod cache for defined versions...");
                 let slugs_to_fetch = ["1228", "12104"];
                 let mut mod_cache_map = HashMap::new();
                 let mut total_mods_loaded = 0;
                 let mut versions_loaded_count = 0;
-
                 for slug in slugs_to_fetch {
-                    let mods = mod_utils::fetch_mods_for_version(&data_for_setup.http_client, slug).await
-                       .with_context(|| format!("Failed to fetch mods for slug '{}' during setup", slug))?;
-
-                    info!(count = mods.len(), slug = slug, "Successfully fetched mods for slug.");
-                    total_mods_loaded += mods.len();
-                    if !mods.is_empty() { versions_loaded_count += 1; }
-                    mod_cache_map.insert(slug.to_string(), mods);
+                    match mod_utils::fetch_mods_for_version(&data_for_setup.http_client, slug).await {
+                        Ok(mods) => {
+                            info!(count = mods.len(), slug = slug, "Successfully fetched mods for slug.");
+                            total_mods_loaded += mods.len();
+                            if !mods.is_empty() { versions_loaded_count += 1; }
+                            mod_cache_map.insert(slug.to_string(), mods);
+                        }
+                        Err(e) => { error!(error = %e, slug = slug, "Failed initial mod fetch for slug during setup."); }
+                    }
                 }
                 *data_for_setup.mod_cache.write().await = mod_cache_map;
                 info!(
                     total_mods = total_mods_loaded,
                     versions_attempted = slugs_to_fetch.len(),
                     versions_loaded = versions_loaded_count,
-                    "Mod cache population complete."
+                    "Initial mod cache population complete."
                 );
 
-                info!(guild_id = %guild_id, "Registering commands in guild...");
-                poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id).await
-                    .map_err(|e| { error!(guild_id = %guild_id, error = %e, "Failed guild command registration"); e })
-                    .context("Failed to register commands in guild")?;
-                info!(guild_id = %guild_id, "Successfully registered commands in guild.");
+                // Register commands globally
+                // This will overwrite any previous global command set with the current one.
+                info!("Registering application commands globally...");
+                poise::builtins::register_globally(ctx, &framework_ref.options().commands).await
+                    .map_err(|e| { error!(error = %e, "Failed global command registration"); e })
+                    .context("Failed to register commands globally")?;
+                info!("Successfully registered application commands globally.");
 
-                Ok(data_for_setup)
+                Ok((*data_for_setup).clone())
             })
         })
         .build();
+
+    scheduler::initialize_and_start_scheduler(app_data_for_scheduler).await?;
 
     let mut client = serenity::ClientBuilder::new(token, intents)
         .framework(framework)
