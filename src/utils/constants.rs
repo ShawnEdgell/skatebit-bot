@@ -1,1 +1,0 @@
-pub const BOT_EMBED_COLOR: u32 = 0x1eaeef;
