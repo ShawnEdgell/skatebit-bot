@@ -1,3 +1,4 @@
+// src/lib.rs
 pub mod commands;
 pub mod types;
 pub mod map_cache;
@@ -5,7 +6,7 @@ pub mod mod_utils;
 pub mod scheduler;
 
 use poise::serenity_prelude as serenity;
-// GuildId is no longer needed here for command registration
+use serenity::model::id::GuildId; // Keep for iterating guild IDs
 use std::{collections::HashMap, env, sync::Arc};
 use dotenvy::dotenv;
 use types::{Data, Error as AppError};
@@ -23,19 +24,6 @@ pub async fn run() -> AnyhowResult<()> {
     let token = env::var("DISCORD_TOKEN")
         .map_err(|e| { error!("Missing DISCORD_TOKEN: {}", e); e })
         .context("Missing DISCORD_TOKEN in the environment")?;
-
-    // GUILD_ID is no longer strictly needed for global command registration
-    // If you use it for other purposes, you can keep its loading logic.
-    // For now, I'm commenting it out as it's not used in this file anymore.
-    /*
-    let guild_id_str = env::var("GUILD_ID")
-        .map_err(|e| { error!("Missing GUILD_ID: {}", e); e })
-        .context("Missing GUILD_ID in the environment")?;
-    let guild_id_val = guild_id_str.parse::<u64>()
-        .map_err(|e| { error!("GUILD_ID not a valid u64: '{}', {}", guild_id_str, e); e })
-        .with_context(|| format!("GUILD_ID is not a valid u64 integer: '{}'", guild_id_str))?;
-    let _guild_id = serenity::model::id::GuildId::new(guild_id_val); // Marked as unused if only for registration
-    */
 
     let intents = serenity::GatewayIntents::non_privileged()
         | serenity::GatewayIntents::MESSAGE_CONTENT;
@@ -65,7 +53,7 @@ pub async fn run() -> AnyhowResult<()> {
             Box::pin(async move {
                 info!("Logged in as {}! (User ID: {})", ready.user.name, ready.user.id);
 
-                // Initial cache loading (remains the same)
+                // --- Cache Loading (remains the same) ---
                 match map_cache::load_maps_from_remote(&data_for_setup.http_client).await {
                     Ok(maps) => {
                         let map_count = maps.len();
@@ -98,14 +86,42 @@ pub async fn run() -> AnyhowResult<()> {
                     versions_loaded = versions_loaded_count,
                     "Initial mod cache population complete."
                 );
+                // --- End Cache Loading ---
 
-                // Register commands globally
-                // This will overwrite any previous global command set with the current one.
-                info!("Registering application commands globally...");
+                // --- Comprehensive Command Cleanup and Registration ---
+
+                // 1. Clear ALL old global application commands
+                info!("Attempting to clear ALL old global application commands...");
+                if let Err(e) = poise::builtins::register_globally(ctx, &[] as &[poise::Command<Data, AppError>]).await {
+                    warn!(error = %e, "Failed to clear all global commands. This might be okay if it's the first run or due to permissions/rate limits.");
+                } else {
+                    info!("Successfully cleared all old global commands.");
+                }
+
+                // 2. Clear old guild-specific commands from all guilds the bot is in
+                info!("Attempting to clear old guild-specific commands from all servers...");
+                let guild_ids: Vec<GuildId> = ready.guilds.iter().map(|g| g.id).collect();
+                if guild_ids.is_empty() {
+                    info!("Bot is not in any guilds, skipping guild command cleanup.");
+                } else {
+                    for guild_id in guild_ids {
+                        info!(guild_id = %guild_id, "Attempting to clear commands for guild...");
+                        if let Err(e) = poise::builtins::register_in_guild(ctx, &[] as &[poise::Command<Data, AppError>], guild_id).await {
+                            warn!(error = %e, guild_id = %guild_id, "Failed to clear commands for guild. Bot might lack 'applications.commands' scope in this guild or hit rate limits.");
+                        } else {
+                            info!(guild_id = %guild_id, "Successfully cleared commands for guild.");
+                        }
+                    }
+                    info!("Finished attempting to clear guild-specific commands.");
+                }
+
+                // 3. Register the current set of commands globally
+                info!("Registering current application commands globally...");
                 poise::builtins::register_globally(ctx, &framework_ref.options().commands).await
                     .map_err(|e| { error!(error = %e, "Failed global command registration"); e })
-                    .context("Failed to register commands globally")?;
-                info!("Successfully registered application commands globally.");
+                    .context("Failed to register current commands globally")?;
+                info!("Successfully registered current application commands globally.");
+                // --- End Command Cleanup and Registration ---
 
                 Ok((*data_for_setup).clone())
             })
