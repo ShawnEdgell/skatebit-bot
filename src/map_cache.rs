@@ -1,74 +1,57 @@
-use crate::types::{ModioMap, ModioPage, Error as AppError};
+// src/map_cache.rs
+use crate::types::{ApiModioMap, GoApiMapsResponse}; // Use the new structs
 use reqwest::Client;
-use std::time::Duration;
-use tracing::{info, warn, error};
-use anyhow::anyhow;
+use tracing::{info, warn, error, instrument}; // Added instrument for consistency if you use it elsewhere
+use anyhow::{anyhow, Context, Result}; // Using anyhow for Result type and context
 
-pub async fn load_maps_from_remote(http_client: &Client) -> Result<Vec<ModioMap>, AppError> {
-    let mut all_maps = Vec::new();
-    let base_url = "https://modio-cache.vercel.app/maps_v2/page_";
-    let mut last_successfully_fetched_page = 0;
-    let mut total_maps_loaded_this_run = 0;
-    let mut pages_checked = 0;
+// This function will be called by your scheduler and during initial bot setup.
+// It now fetches all maps in one go from your new Go API.
+#[instrument(skip(http_client))] // Skips logging the http_client instance itself
+pub async fn load_maps_from_go_api(
+    http_client: &Client,
+    api_maps_url: &str, // e.g., "https://api.skatebit.app/api/v1/skaterxl/maps"
+) -> Result<Vec<ApiModioMap>> { // Return a Result with Vec<ApiModioMap> or an anyhow::Error
+    info!(url = %api_maps_url, "Map Cache: Starting map data fetch from self-hosted Go API...");
 
-    info!("Starting map cache loading from remote...");
+    let response = http_client.get(api_maps_url)
+        .timeout(std::time::Duration::from_secs(30)) // Add a timeout for the request
+        .send()
+        .await
+        .context(format!("Map Cache: HTTP request to {} failed", api_maps_url))?;
 
-    for page_num in 1..=20 {
-        pages_checked = page_num;
-        let url = format!("{}{}.json", base_url, page_num);
-        info!(page = page_num, url = %url, "Fetching map page...");
-
-        let response = http_client.get(&url).send().await
-            .map_err(|e| { warn!(error = %e, page = page_num, url = %url, "Request error during map cache loading"); e })?;
-
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            info!(page = page_num, "Page not found. Assuming end of map pages.");
-            last_successfully_fetched_page = page_num -1;
-            break;
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            warn!(page = page_num, url = %url, status = %status, "Failed to fetch map page with non-success status. Stopping.");
-            break;
-        }
-
-        let page_data = response.json::<ModioPage>().await
-            .map_err(|e| { error!(error = %e, page = page_num, url = %url, "Failed to parse JSON for map page"); e })?;
-
-        if page_data.map_entries.is_empty() {
-            info!(page = page_num, "Received empty map list. Assuming end of map pages.");
-            last_successfully_fetched_page = if page_num > 0 { page_num -1 } else { 0 };
-            break;
-        }
-        total_maps_loaded_this_run += page_data.map_entries.len();
-        all_maps.extend(page_data.map_entries);
-        last_successfully_fetched_page = page_num;
-
-        tokio::time::sleep(Duration::from_millis(150)).await;
+    if !response.status().is_success() {
+        let status = response.status();
+        // Attempt to get error body for better debugging
+        let error_body = response.text().await.unwrap_or_else(|e| format!("Failed to read error body: {}",e));
+        error!(
+            url = %api_maps_url,
+            status = %status,
+            body = %error_body,
+            "Map Cache: Failed to fetch maps from Go API. Non-success status."
+        );
+        return Err(anyhow!("Map Cache: Go API request to {} returned status {}", api_maps_url, status));
     }
 
-    if total_maps_loaded_this_run > 0 {
-        info!(
-            count = total_maps_loaded_this_run,
-            pages = last_successfully_fetched_page,
-            "Map cache updated successfully."
+    // Try to parse the JSON response
+    let api_response = response.json::<GoApiMapsResponse>().await
+        .context(format!("Map Cache: Failed to parse JSON response from {}", api_maps_url))?;
+
+    // Optional: Validate itemType if you want to be extra sure
+    if api_response.item_type != "maps" {
+        warn!(
+            expected = "maps",
+            got = %api_response.item_type,
+            url = %api_maps_url,
+            "Map Cache: Unexpected itemType received from Go API."
         );
-    } else if pages_checked > 0 && last_successfully_fetched_page == 0 && all_maps.is_empty() {
-         warn!(
-            pages_checked = pages_checked,
-            "Map cache loading: No maps found or error on first page(s)."
-        );
-    } else if pages_checked > 0 {
-         info!(
-            pages_checked = pages_checked,
-            "Map cache: No new maps found or an issue occurred after the first page."
-        );
+        // You might choose to error here, or proceed if items look correct
     }
 
-    if all_maps.is_empty() && last_successfully_fetched_page == 0 && pages_checked > 0 {
-        return Err(anyhow!("Initial map cache loading failed: Could not retrieve or parse critical map page(s)."));
-    }
+    info!(
+        count = api_response.items.len(),
+        last_updated = %api_response.last_updated, // This is a string from Go API
+        "Map Cache: Successfully fetched and parsed map data from Go API."
+    );
 
-    Ok(all_maps)
+    Ok(api_response.items)
 }

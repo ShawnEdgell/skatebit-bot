@@ -6,24 +6,22 @@ pub mod mod_utils;
 pub mod scheduler;
 
 use poise::serenity_prelude as serenity;
-use serenity::model::id::GuildId; // Keep for iterating guild IDs
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, env, sync::Arc, time::Duration}; // Added std::time::Duration
 use dotenvy::dotenv;
 use types::{Data, Error as AppError};
 use anyhow::{Context as AnyhowContext, Result as AnyhowResult};
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, instrument};
 
 pub async fn run() -> AnyhowResult<()> {
     match dotenv() {
-        Ok(_) => info!(".env file loaded successfully."),
+        Ok(_) => info!(".env file loaded successfully for bot."),
         Err(e) => {
-            warn!("Failed to load .env file: {}. Will try using environment variables directly.", e);
+            warn!("Failed to load .env file for bot: {}. Relying on system environment variables.", e);
         }
     }
 
     let token = env::var("DISCORD_TOKEN")
-        .map_err(|e| { error!("Missing DISCORD_TOKEN: {}", e); e })
-        .context("Missing DISCORD_TOKEN in the environment")?;
+        .context("DISCORD_TOKEN environment variable not set")?;
 
     let intents = serenity::GatewayIntents::non_privileged()
         | serenity::GatewayIntents::MESSAGE_CONTENT;
@@ -50,112 +48,156 @@ pub async fn run() -> AnyhowResult<()> {
         })
         .setup(move |ctx, ready, framework_ref| {
             let data_for_setup = app_data.clone();
+            let commands_to_register: &[poise::Command<Data, AppError>] = &framework_ref.options().commands;
+            
             Box::pin(async move {
-                info!("Logged in as {}! (User ID: {})", ready.user.name, ready.user.id);
+                info!("Bot logged in as {} (User ID: {})", ready.user.name, ready.user.id);
+                info!("Connected to {} guilds.", ready.guilds.len());
 
-                // --- Cache Loading (remains the same) ---
-                match map_cache::load_maps_from_remote(&data_for_setup.http_client).await {
-                    Ok(maps) => {
-                        let map_count = maps.len();
-                        *data_for_setup.map_cache.write().await = maps;
-                        info!("Initial map cache populated with {} maps.", map_count);
+                // --- Initial Map Cache Loading (from new Go API) WITH RETRY ---
+                let go_api_base_url = env::var("GO_MODIO_API_BASE_URL")
+                    .unwrap_or_else(|_| {
+                        warn!("GO_MODIO_API_BASE_URL not set, defaulting to live https://api.skatebit.app");
+                        "https://api.skatebit.app".to_string()
+                    });
+                let maps_api_endpoint = format!("{}/api/v1/skaterxl/maps", go_api_base_url);
+
+                info!("Initial Setup: Attempting to fetch map cache from self-hosted Go API ({})", maps_api_endpoint);
+                
+                let mut initial_maps_loaded_successfully = false;
+                for attempt in 1..=3 { // Try up to 3 times
+                    match map_cache::load_maps_from_go_api(&data_for_setup.http_client, &maps_api_endpoint).await {
+                        Ok(maps_from_api) => {
+                            if !maps_from_api.is_empty() {
+                                let map_count = maps_from_api.len();
+                                *data_for_setup.map_cache.write().await = maps_from_api;
+                                info!(attempt, map_count, "Initial Setup: Map cache populated from Go API.");
+                                initial_maps_loaded_successfully = true;
+                                break; // Success, exit retry loop
+                            } else {
+                                warn!(attempt, "Initial Setup: Go API returned empty map list. API might still be initializing. Retrying soon...");
+                            }
+                        }
+                        Err(e) => { 
+                            error!(error = ?e, attempt, "Initial Setup: Failed map cache load from Go API.");
+                            // Decide if you want to retry on error or just log. For now, we'll retry.
+                        }
                     }
-                    Err(e) => { error!(error = %e, "Failed initial map cache load during setup."); }
+                    if attempt < 3 { // Don't sleep after the last attempt
+                        let sleep_duration = Duration::from_secs(5 * attempt as u64); // Increase delay: 5s, 10s
+                        info!("Initial Setup: Waiting {:?} before retrying map fetch.", sleep_duration);
+                        tokio::time::sleep(sleep_duration).await;
+                    }
                 }
+                if !initial_maps_loaded_successfully {
+                    error!("Initial Setup: FAILED to load maps from Go API after multiple attempts. Bot may have stale/no map data for this session.");
+                }
+                // --- End Initial Map Cache Loading ---
 
-                info!("Populating initial mod cache for defined versions...");
+                // --- Initial Slug-based Mod Cache Loading (UNCHANGED) ---
+                info!("Initial Setup: Populating slug-based mod cache...");
+                // ... (your existing slug-based mod cache logic remains here) ...
                 let slugs_to_fetch = ["1228", "12104"];
-                let mut mod_cache_map = HashMap::new();
-                let mut total_mods_loaded = 0;
-                let mut versions_loaded_count = 0;
+                let mut mod_cache_map_for_setup = HashMap::new();
+                let mut total_mods_loaded_setup = 0;
+                let mut versions_loaded_count_setup = 0;
+
                 for slug in slugs_to_fetch {
                     match mod_utils::fetch_mods_for_version(&data_for_setup.http_client, slug).await {
                         Ok(mods) => {
-                            info!(count = mods.len(), slug = slug, "Successfully fetched mods for slug.");
-                            total_mods_loaded += mods.len();
-                            if !mods.is_empty() { versions_loaded_count += 1; }
-                            mod_cache_map.insert(slug.to_string(), mods);
+                            info!(count = mods.len(), slug, "Initial Setup: Fetched slug-based mods for slug.");
+                            total_mods_loaded_setup += mods.len();
+                            if !mods.is_empty() { versions_loaded_count_setup += 1; }
+                            mod_cache_map_for_setup.insert(slug.to_string(), mods);
                         }
-                        Err(e) => { error!(error = %e, slug = slug, "Failed initial mod fetch for slug during setup."); }
+                        Err(e) => { 
+                            error!(error = ?e, slug, "Initial Setup: Failed slug-based mod fetch for slug.");
+                        }
                     }
                 }
-                *data_for_setup.mod_cache.write().await = mod_cache_map;
-                info!(
-                    total_mods = total_mods_loaded,
-                    versions_attempted = slugs_to_fetch.len(),
-                    versions_loaded = versions_loaded_count,
-                    "Initial mod cache population complete."
-                );
-                // --- End Cache Loading ---
-
-                // --- Comprehensive Command Cleanup and Registration ---
-
-                // 1. Clear ALL old global application commands
-                info!("Attempting to clear ALL old global application commands...");
-                if let Err(e) = poise::builtins::register_globally(ctx, &[] as &[poise::Command<Data, AppError>]).await {
-                    warn!(error = %e, "Failed to clear all global commands. This might be okay if it's the first run or due to permissions/rate limits.");
+                if total_mods_loaded_setup > 0 || versions_loaded_count_setup > 0 {
+                    *data_for_setup.mod_cache.write().await = mod_cache_map_for_setup;
+                    info!( total_mods = total_mods_loaded_setup, versions_attempted = slugs_to_fetch.len(), versions_loaded = versions_loaded_count_setup, "Initial Setup: Slug-based mod cache population complete.");
                 } else {
-                    info!("Successfully cleared all old global commands.");
+                    warn!("Initial Setup: No slug-based mods loaded, mod cache might be empty or fetch failed.");
                 }
-
-                // 2. Clear old guild-specific commands from all guilds the bot is in
-                info!("Attempting to clear old guild-specific commands from all servers...");
-                let guild_ids: Vec<GuildId> = ready.guilds.iter().map(|g| g.id).collect();
-                if guild_ids.is_empty() {
-                    info!("Bot is not in any guilds, skipping guild command cleanup.");
-                } else {
-                    for guild_id in guild_ids {
+                // --- End Initial Slug-based Mod Cache Loading ---
+                
+                // --- THOROUGH COMMAND CLEANUP AND REGISTRATION ---
+                info!("Starting thorough command cleanup and registration...");
+                // ... (your existing command registration logic from the "skatebit_bot_lib_rs_command_cleanup" artifact) ...
+                // 1. Clear commands from all guilds
+                if !ready.guilds.is_empty() {
+                    info!("Attempting to clear old guild-specific commands from all {} servers...", ready.guilds.len());
+                    for guild_status in &ready.guilds {
+                        let guild_id = guild_status.id;
                         info!(guild_id = %guild_id, "Attempting to clear commands for guild...");
                         if let Err(e) = poise::builtins::register_in_guild(ctx, &[] as &[poise::Command<Data, AppError>], guild_id).await {
-                            warn!(error = %e, guild_id = %guild_id, "Failed to clear commands for guild. Bot might lack 'applications.commands' scope in this guild or hit rate limits.");
+                            warn!(error = %e, guild_id = %guild_id, "Failed to clear commands for guild.");
                         } else {
                             info!(guild_id = %guild_id, "Successfully cleared commands for guild.");
                         }
                     }
                     info!("Finished attempting to clear guild-specific commands.");
+                } else {
+                    info!("Bot is not in any guilds, skipping guild command cleanup.");
                 }
 
+                // 2. Clear ALL old global application commands
+                info!("Attempting to clear ALL old global application commands...");
+                if let Err(e) = poise::builtins::register_globally(ctx, &[] as &[poise::Command<Data, AppError>]).await {
+                    warn!(error = %e, "Failed to clear all global commands.");
+                } else {
+                    info!("Successfully cleared all old global commands.");
+                }
+            
                 // 3. Register the current set of commands globally
                 info!("Registering current application commands globally...");
-                poise::builtins::register_globally(ctx, &framework_ref.options().commands).await
-                    .map_err(|e| { error!(error = %e, "Failed global command registration"); e })
-                    .context("Failed to register current commands globally")?;
+                poise::builtins::register_globally(ctx, commands_to_register).await
+                    .context("Failed to register current commands globally during setup")?;
                 info!("Successfully registered current application commands globally.");
-                // --- End Command Cleanup and Registration ---
+                // --- End Thorough Command Cleanup and Registration ---
 
                 Ok((*data_for_setup).clone())
             })
         })
         .build();
 
-    scheduler::initialize_and_start_scheduler(app_data_for_scheduler).await?;
+    scheduler::initialize_and_start_scheduler(app_data_for_scheduler).await
+        .context("Failed to initialize and start the scheduler")?;
 
+    info!("Building Serenity client...");
     let mut client = serenity::ClientBuilder::new(token, intents)
         .framework(framework)
         .await
-        .map_err(|e| { error!(error = %e, "Fatal error creating Discord client"); e })
+        .map_err(|e| { error!(error = %e, "Fatal: Error creating Discord client"); e })
         .context("Fatal error creating Discord client")?;
 
-    info!("Starting bot connection to Discord...");
+    info!("Starting Discord bot connection...");
     client.start_autosharded().await
-        .map_err(|e| { error!(error = %e, "Client runtime error"); e })
+        .map_err(|e| { error!(error = %e, "Fatal: Discord client runtime error"); e })
         .context("Discord client stopped unexpectedly")?;
 
     Ok(())
 }
 
+#[instrument(skip(error))]
 async fn on_error(error: poise::FrameworkError<'_, Data, AppError>) {
+    // ... (your on_error function remains the same) ...
     match error {
         poise::FrameworkError::Setup { error, .. } => {
-            error!(error = ?error, "Framework setup error");
+            error!(error = ?error, "Poise Framework setup error");
         },
         poise::FrameworkError::Command { error, ctx, .. } => {
-            error!(error = ?error, command = %ctx.command().name, "Error executing command");
-             let _ = ctx.say("Oops, an internal error occurred!").await;
+            let command_name = ctx.command().qualified_name.clone();
+            error!(error = ?error, command = %command_name, "Error executing command");
+            if let Err(e) = ctx.say("Oops, an internal error occurred while running that command!").await {
+                error!(error = ?e, "Failed to send error message to Discord");
+            }
         },
-        error => {
-            if let Err(e) = poise::builtins::on_error(error).await {
-                 error!(error = ?e, "Error occurred while handling another error");
+        other_error => {
+            if let Err(e) = poise::builtins::on_error(other_error).await {
+                 error!(error = ?e, "Error occurred while poise was handling another error");
             }
         }
     }

@@ -1,4 +1,5 @@
-use crate::types::{Context, Error, ModioMap, BOT_EMBED_COLOR};
+// src/commands/map_cmd.rs
+use crate::types::{Context, Error, ApiModioMap, BOT_EMBED_COLOR, ApiModioModfile, ApiModioTag};
 use poise::serenity_prelude as serenity;
 use poise::CreateReply;
 use tracing::{info, warn};
@@ -8,12 +9,12 @@ async fn map_name_autocomplete(
     partial: &str,
 ) -> Vec<String> {
     let partial_lowercase = partial.to_lowercase();
-    let map_cache_guard = ctx.data().map_cache.read().await;
+    let map_cache_guard = ctx.data().map_cache.read().await; // This now contains Vec<ApiModioMap>
 
     map_cache_guard
         .iter()
-        .filter(move |map_entry: &&ModioMap| map_entry.name.to_lowercase().contains(&partial_lowercase))
-        .map(|map_entry: &ModioMap| map_entry.name.clone())
+        .filter(move |map_entry: &&ApiModioMap| map_entry.name.to_lowercase().contains(&partial_lowercase)) // UPDATED HERE
+        .map(|map_entry: &ApiModioMap| map_entry.name.clone()) // UPDATED HERE
         .take(25)
         .collect()
 }
@@ -28,22 +29,23 @@ pub async fn map(
 ) -> Result<(), Error> {
     info!(user = %ctx.author().name, query = %search, "Map command received");
 
-    let map_cache_guard = ctx.data().map_cache.read().await;
+    let map_cache_guard = ctx.data().map_cache.read().await; // This is Vec<ApiModioMap>
     let search_lowercase = search.to_lowercase();
 
-    let found_map: Option<&ModioMap> = map_cache_guard
+    let found_map: Option<&ApiModioMap> = map_cache_guard // UPDATED HERE
         .iter()
         .find(|m| m.name.to_lowercase() == search_lowercase);
 
-    let reply = if let Some(entry) = found_map {
+    let reply = if let Some(entry) = found_map { // entry is now &ApiModioMap
         info!(map_name = %entry.name, "Map found in cache");
 
-        let author = &entry.submitted_by.username;
+        // Ensure these field accesses match your ApiModioMap and its sub-structs
+        let author = &entry.submitted_by.username; // Assuming ApiModioUser has username
 
         let download_link = entry
             .modfile
             .as_ref()
-            .map(|mf| mf.download.binary_url.as_str())
+            .map(|mf: &ApiModioModfile| mf.download.binary_url.as_str()) // Option<&str>
             .unwrap_or("N/A");
 
         let download_field_value = if download_link == "N/A" {
@@ -52,34 +54,38 @@ pub async fn map(
             format!("[Download Map]({})", download_link)
         };
 
-        let size = entry
+        let size_mb = entry
             .modfile
             .as_ref()
-            .and_then(|mf| mf.filesize.map(|s| format!("{:.2} MB", s as f64 / (1024.0 * 1024.0))))
+            .and_then(|mf: &ApiModioModfile| mf.filesize) // filesize is Option<i64>
+            .map(|s| format!("{:.2} MB", s as f64 / (1024.0 * 1024.0)))
             .unwrap_or_else(|| "Unknown size".to_string());
-
-        let tags = entry
+        
+        let tags_str = entry
             .tags
             .as_ref()
             .filter(|tags_vec| !tags_vec.is_empty())
-            .map(|tags_vec| tags_vec.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "))
+            .map(|tags_vec| tags_vec.iter().map(|t: &ApiModioTag| t.name.as_str()).collect::<Vec<_>>().join(", "))
             .unwrap_or_else(|| "No tags".to_string());
 
-        let image_url = entry.logo.thumb_1280x720.as_deref().unwrap_or(&entry.logo.original);
+        // Assuming ApiModioLogo has thumb_1280x720 (Option<String>) and original (String)
+        let image_url = entry.logo.thumb_1280x720.as_deref()
+            .unwrap_or_else(|| entry.logo.original.as_str());
+
 
         let embed = serenity::CreateEmbed::default()
             .title(&entry.name)
-            .url(&entry.profile_url)
+            .url(&entry.profile_url) // Assuming profile_url is directly in ApiModioMap
             .description(&entry.summary)
             .color(BOT_EMBED_COLOR)
             .image(image_url)
             .field("Author", author, true)
-            .field("Size", &size, true)
-            .field("Tags", tags, false)
+            .field("Size", &size_mb, true) // Changed to size_mb
+            .field("Tags", tags_str, false) // Changed to tags_str
             .field("Link", download_field_value, false)
             .timestamp(serenity::Timestamp::now())
             .footer(serenity::CreateEmbedFooter::new(format!("Source: mod.io | Requested by {}", ctx.author().name)));
-
+        
         CreateReply::default().embed(embed)
 
     } else {

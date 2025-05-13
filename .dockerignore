@@ -1,0 +1,17 @@
+# Ignore Git directory
+.git
+.gitignore
+
+# Ignore Rust's build output directory
+/target
+
+# Ignore local environment files (secrets should be passed via Docker environment variables)
+.env
+
+# IDE/Editor specific files
+.vscode/
+.idea/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
