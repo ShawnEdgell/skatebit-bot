@@ -17,3 +17,8 @@ strum = { version = "0.27", features = ["derive"] }
 strum_macros = "0.27"
 anyhow = "1.0"
 tokio-cron-scheduler = "0.14.0"
+
+# Redis Dependencies
+redis = { version = "0.31.0", features = ["tokio-comp", "aio"] }
+deadpool-redis = { version = "0.20", features = ["rt_tokio_1"] }
+

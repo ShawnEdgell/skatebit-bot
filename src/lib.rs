@@ -1,12 +1,10 @@
-// src/lib.rs
 pub mod commands;
 pub mod types;
-pub mod map_cache;
 pub mod mod_utils;
 pub mod scheduler;
 
 use poise::serenity_prelude as serenity;
-use std::{collections::HashMap, env, sync::Arc, time::Duration}; // Added std::time::Duration
+use std::{collections::HashMap, env, sync::Arc};
 use dotenvy::dotenv;
 use types::{Data, Error as AppError};
 use anyhow::{Context as AnyhowContext, Result as AnyhowResult};
@@ -22,11 +20,19 @@ pub async fn run() -> AnyhowResult<()> {
 
     let token = env::var("DISCORD_TOKEN")
         .context("DISCORD_TOKEN environment variable not set")?;
+    
+    let redis_url = env::var("REDIS_URL")
+        .unwrap_or_else(|_| {
+            warn!("REDIS_URL not set, defaulting to redis://127.0.0.1:6379");
+            "redis://127.0.0.1:6379".to_string()
+        });
 
     let intents = serenity::GatewayIntents::non_privileged()
         | serenity::GatewayIntents::MESSAGE_CONTENT;
 
-    let app_data = Arc::new(Data::new());
+    let app_data = Arc::new(Data::new(&redis_url)
+        .context("Failed to initialize application data with Redis pool")?);
+    
     let app_data_for_scheduler = app_data.clone();
 
     let framework = poise::Framework::builder()
@@ -54,49 +60,9 @@ pub async fn run() -> AnyhowResult<()> {
                 info!("Bot logged in as {} (User ID: {})", ready.user.name, ready.user.id);
                 info!("Connected to {} guilds.", ready.guilds.len());
 
-                // --- Initial Map Cache Loading (from new Go API) WITH RETRY ---
-                let go_api_base_url = env::var("GO_MODIO_API_BASE_URL")
-                    .unwrap_or_else(|_| {
-                        warn!("GO_MODIO_API_BASE_URL not set, defaulting to live https://api.skatebit.app");
-                        "https://api.skatebit.app".to_string()
-                    });
-                let maps_api_endpoint = format!("{}/api/v1/skaterxl/maps", go_api_base_url);
+                info!("Initial Setup: Data will be fetched from Redis on demand by commands.");
 
-                info!("Initial Setup: Attempting to fetch map cache from self-hosted Go API ({})", maps_api_endpoint);
-                
-                let mut initial_maps_loaded_successfully = false;
-                for attempt in 1..=3 { // Try up to 3 times
-                    match map_cache::load_maps_from_go_api(&data_for_setup.http_client, &maps_api_endpoint).await {
-                        Ok(maps_from_api) => {
-                            if !maps_from_api.is_empty() {
-                                let map_count = maps_from_api.len();
-                                *data_for_setup.map_cache.write().await = maps_from_api;
-                                info!(attempt, map_count, "Initial Setup: Map cache populated from Go API.");
-                                initial_maps_loaded_successfully = true;
-                                break; // Success, exit retry loop
-                            } else {
-                                warn!(attempt, "Initial Setup: Go API returned empty map list. API might still be initializing. Retrying soon...");
-                            }
-                        }
-                        Err(e) => { 
-                            error!(error = ?e, attempt, "Initial Setup: Failed map cache load from Go API.");
-                            // Decide if you want to retry on error or just log. For now, we'll retry.
-                        }
-                    }
-                    if attempt < 3 { // Don't sleep after the last attempt
-                        let sleep_duration = Duration::from_secs(5 * attempt as u64); // Increase delay: 5s, 10s
-                        info!("Initial Setup: Waiting {:?} before retrying map fetch.", sleep_duration);
-                        tokio::time::sleep(sleep_duration).await;
-                    }
-                }
-                if !initial_maps_loaded_successfully {
-                    error!("Initial Setup: FAILED to load maps from Go API after multiple attempts. Bot may have stale/no map data for this session.");
-                }
-                // --- End Initial Map Cache Loading ---
-
-                // --- Initial Slug-based Mod Cache Loading (UNCHANGED) ---
                 info!("Initial Setup: Populating slug-based mod cache...");
-                // ... (your existing slug-based mod cache logic remains here) ...
                 let slugs_to_fetch = ["1228", "12104"];
                 let mut mod_cache_map_for_setup = HashMap::new();
                 let mut total_mods_loaded_setup = 0;
@@ -121,12 +87,8 @@ pub async fn run() -> AnyhowResult<()> {
                 } else {
                     warn!("Initial Setup: No slug-based mods loaded, mod cache might be empty or fetch failed.");
                 }
-                // --- End Initial Slug-based Mod Cache Loading ---
                 
-                // --- THOROUGH COMMAND CLEANUP AND REGISTRATION ---
                 info!("Starting thorough command cleanup and registration...");
-                // ... (your existing command registration logic from the "skatebit_bot_lib_rs_command_cleanup" artifact) ...
-                // 1. Clear commands from all guilds
                 if !ready.guilds.is_empty() {
                     info!("Attempting to clear old guild-specific commands from all {} servers...", ready.guilds.len());
                     for guild_status in &ready.guilds {
@@ -143,7 +105,6 @@ pub async fn run() -> AnyhowResult<()> {
                     info!("Bot is not in any guilds, skipping guild command cleanup.");
                 }
 
-                // 2. Clear ALL old global application commands
                 info!("Attempting to clear ALL old global application commands...");
                 if let Err(e) = poise::builtins::register_globally(ctx, &[] as &[poise::Command<Data, AppError>]).await {
                     warn!(error = %e, "Failed to clear all global commands.");
@@ -151,13 +112,11 @@ pub async fn run() -> AnyhowResult<()> {
                     info!("Successfully cleared all old global commands.");
                 }
             
-                // 3. Register the current set of commands globally
                 info!("Registering current application commands globally...");
                 poise::builtins::register_globally(ctx, commands_to_register).await
                     .context("Failed to register current commands globally during setup")?;
                 info!("Successfully registered current application commands globally.");
-                // --- End Thorough Command Cleanup and Registration ---
-
+                
                 Ok((*data_for_setup).clone())
             })
         })
@@ -183,7 +142,6 @@ pub async fn run() -> AnyhowResult<()> {
 
 #[instrument(skip(error))]
 async fn on_error(error: poise::FrameworkError<'_, Data, AppError>) {
-    // ... (your on_error function remains the same) ...
     match error {
         poise::FrameworkError::Setup { error, .. } => {
             error!(error = ?error, "Poise Framework setup error");

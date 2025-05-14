@@ -1,50 +1,60 @@
-# Stage 1: Builder - Compile the Rust application
-FROM rust:1.86-alpine AS builder
-
-# Install C build tools, OpenSSL development libraries, pkgconf, and perl.
-RUN apk add --no-cache build-base openssl-dev pkgconf perl
-
-# Set environment variables to encourage static linking of OpenSSL
-# and help openssl-sys find the libraries on Alpine.
+# Stage 0: Planner - Create a recipe for dependencies
+FROM rust:1.86-alpine AS planner
+# Match your project's Rust version
+WORKDIR /app
+RUN apk add --no-cache build-base openssl-dev pkgconf perl # Keep build deps
 ENV OPENSSL_STATIC=1
 ENV OPENSSL_DIR=/usr
 ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 
-WORKDIR /usr/src/skatebit-bot
+# Install cargo-chef
+RUN cargo install cargo-chef --locked
 
-# Copy Cargo.toml and Cargo.lock to cache dependencies
-COPY Cargo.toml Cargo.lock ./
+COPY . .
+# Compute a recipe for dependencies
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Create a dummy main.rs and build an empty project to cache dependencies.
-RUN mkdir src && \
-    echo "fn main() {println!(\"Dummy build for dependency caching\")}" > src/main.rs && \
-    echo "Building dummy project to cache dependencies..." && \
-    cargo build --release && \
-    echo "Dummy project build complete. Cleaning up..." && \
-    rm -rf src target
-
-# Now copy your actual application source code
-COPY ./src ./src
-
-# Build your actual application binary in release mode
-RUN echo "Building actual application..." && \
-    cargo build --release && \
-    echo "Actual application build complete."
-
-# Stage 2: Runtime - Create a minimal final image
-FROM alpine:latest
-
-# Add ca-certificates for making HTTPS calls
-RUN apk --no-cache add ca-certificates
-# If OpenSSL was statically linked, we might not need runtime openssl libs.
-# If dynamic linking happened or some part still needs it, you might need:
-# RUN apk add --no-cache libssl3 libcrypto3 # Or just 'openssl'
-
+# Stage 1: Cooker - Build dependencies based on the recipe
+FROM rust:1.86-alpine AS cooker
 WORKDIR /app
+RUN apk add --no-cache build-base openssl-dev pkgconf perl # Keep build deps
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_DIR=/usr
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
 
-# Copy only the compiled binary from the builder stage's release target directory.
-COPY --from=builder /usr/src/skatebit-bot/target/release/skatebit-bot .
+# Install cargo-chef (needed to cook)
+RUN cargo install cargo-chef --locked
+# Copy the recipe from the planner stage
+COPY --from=planner /app/recipe.json recipe.json
+# Build dependencies
+RUN cargo chef cook --release --recipe-path recipe.json
 
-# CMD to run the application
+# Stage 2: Builder - Build the application code
+FROM rust:1.86-alpine AS builder
+WORKDIR /app
+RUN apk add --no-cache build-base openssl-dev pkgconf perl # Keep build deps
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_DIR=/usr
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+
+COPY . .
+# Copy over the pre-built dependencies from the cooker stage
+COPY --from=cooker /app/target target
+COPY --from=cooker /usr/local/cargo/registry /usr/local/cargo/registry
+
+# Build the application, using the cached dependencies
+RUN cargo build --release --locked
+
+# Stage 3: Runtime - Create a minimal final image (your existing runtime stage)
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates tzdata
+ENV TZ=Etc/UTC
+WORKDIR /app
+COPY --from=builder /app/target/release/skatebit-bot .
+# (Optional) Add a non-root user
+# RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# USER appuser
 CMD ["./skatebit-bot"]
